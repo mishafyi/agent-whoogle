@@ -87,3 +87,69 @@ def test_parse_results_empty_html():
 def test_parse_results_captcha_returns_empty():
     results = parse_results(CAPTCHA_HTML)
     assert results == []
+
+
+# GBV1 layout (div.Gx5Zad.xpd.EtOod.pkphOe) — observed on datacenter IPs
+GBV1_HTML = '''
+<html><body><div id="main">
+<div class="Gx5Zad xpd EtOod pkphOe">
+  <div class="egMi0 kCrYT">
+    <a href="/url?q=https://example.com/gbv1-page&amp;sa=U">
+      Example GBV1 Title - Sitename example.com
+    </a>
+  </div>
+  <div class="kCrYT">
+    <div class="BNeawe">This is the snippet from the gbv1 layout.</div>
+  </div>
+</div>
+<div class="Gx5Zad xpd EtOod pkphOe">
+  <div class="kCrYT">
+    <a href="/url?q=https://example.com/gbv1-page2&amp;sa=U">
+      Second GBV1 Result - Other Site
+    </a>
+  </div>
+  <div class="kCrYT">
+    <div>Another snippet here with details.</div>
+  </div>
+</div>
+</div></body></html>
+'''
+
+
+def test_parse_gbv1_layout():
+    results = parse_results(GBV1_HTML)
+    assert len(results) == 2
+    assert results[0]["url"] == "https://example.com/gbv1-page"
+    assert "GBV1 Title" in results[0]["title"]
+    assert "snippet from the gbv1 layout" in results[0]["snippet"]
+    assert results[1]["url"] == "https://example.com/gbv1-page2"
+    assert results[1]["snippet"] != ""
+
+
+def test_parse_gbv1_filters_ads():
+    ad_gbv1 = '''
+    <html><body><div id="main">
+    <div class="Gx5Zad xpd EtOod pkphOe">
+      <div>Sponsored</div>
+      <div class="kCrYT">
+        <a href="/url?q=https://ad.example.com&amp;sa=U">Ad Result</a>
+      </div>
+    </div>
+    <div class="Gx5Zad xpd EtOod pkphOe">
+      <div class="kCrYT">
+        <a href="/url?q=https://real.example.com&amp;sa=U">Real Result Title</a>
+      </div>
+      <div class="kCrYT">Real snippet text.</div>
+    </div>
+    </div></body></html>
+    '''
+    results = parse_results(ad_gbv1)
+    assert len(results) == 1
+    assert results[0]["url"] == "https://real.example.com"
+
+
+def test_parse_ad_html_filtered():
+    """Test that the AD_HTML sample has its ad results filtered out."""
+    results = parse_results(AD_HTML)
+    for r in results:
+        assert "ad.example.com" not in r["url"]

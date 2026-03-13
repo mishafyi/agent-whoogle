@@ -5,7 +5,6 @@ has_ad_content) plus new HTML parsing logic for extracting results from
 Google's gbv=1 basic HTML mode.
 """
 
-import re
 import urllib.parse as urlparse
 from typing import Dict, List, Optional
 
@@ -36,6 +35,7 @@ CAPTCHA_MARKER = 'div class="g-recaptcha"'
 
 # Result container CSS classes (tiered fallback)
 PRIMARY_SELECTORS = ['div.ZINbbc', 'div.ezO2md']
+GBV1_SELECTORS = ['div.Gx5Zad.xpd.EtOod.pkphOe']
 SECONDARY_SELECTORS = ['div.g', 'div.tF2Cxc']
 
 
@@ -134,6 +134,64 @@ def _parse_primary(soup: BeautifulSoup) -> List[Dict[str, str]]:
     return results
 
 
+def _parse_gbv1(soup: BeautifulSoup) -> List[Dict[str, str]]:
+    """Parse results from Google's gbv=1 layout using Gx5Zad containers.
+
+    Structure observed on datacenter IPs:
+      div.Gx5Zad.xpd.EtOod.pkphOe  (result container)
+        div.kCrYT or div.egMi0.kCrYT  (title link wrapper)
+          a[href=/url?q=...]  (link with title text)
+        div.kCrYT  (snippet wrapper — sibling of the title div)
+    """
+    results = []
+    seen_urls = set()
+    for selector in GBV1_SELECTORS:
+        containers = soup.select(selector)
+        if not containers:
+            continue
+        for container in containers:
+            if _is_ad_result(container):
+                continue
+            # Find the title link — first <a> with /url?q= href
+            link = None
+            for a in container.find_all('a', href=True):
+                href = a.get('href', '')
+                if href.startswith('/url?q='):
+                    url = _extract_url_from_href(href)
+                    if url and url.startswith('http'):
+                        parsed = urlparse.urlparse(url)
+                        if parsed.hostname and 'google' in parsed.hostname:
+                            continue
+                        link = a
+                        break
+            if not link:
+                continue
+            url = _extract_url_from_href(link.get('href', ''))
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = _extract_text(link)
+            if not title or len(title) < 3:
+                continue
+            # Extract snippet from sibling div.kCrYT of the title's parent
+            snippet = ''
+            title_parent = link.parent
+            if title_parent:
+                for sib in title_parent.find_next_siblings():
+                    sib_text = _extract_text(sib)
+                    if sib_text and sib_text != title:
+                        snippet = sib_text
+                        break
+            results.append({
+                'title': title,
+                'url': url,
+                'snippet': snippet,
+            })
+        if results:
+            return results
+    return results
+
+
 def _parse_secondary(soup: BeautifulSoup) -> List[Dict[str, str]]:
     """Parse results using secondary selectors (standard Google)."""
     results = []
@@ -180,6 +238,18 @@ def _parse_tertiary(soup: BeautifulSoup) -> List[Dict[str, str]]:
         title = _extract_text(link)
         if not title or len(title) < 3:
             continue
+        # Check parent containers for ad indicators
+        parent = link.parent
+        is_ad = False
+        for _ in range(4):
+            if parent is None:
+                break
+            if _is_ad_result(parent):
+                is_ad = True
+                break
+            parent = parent.parent
+        if is_ad:
+            continue
         results.append({
             'title': title,
             'url': url,
@@ -192,9 +262,10 @@ def parse_results(html: str, num: int = 10) -> List[Dict[str, str]]:
     """Parse Google search HTML and extract results as structured data.
 
     Uses tiered CSS selector fallbacks:
-    1. Primary: div.ZINbbc / div.ezO2md (gbv=1 basic mode)
-    2. Secondary: div.g / div.tF2Cxc (standard Google)
-    3. Tertiary: generic <a> link extraction
+    1. Primary: div.ZINbbc / div.ezO2md (gbv=1 basic mode, some regions)
+    2. GBV1: div.Gx5Zad.xpd.EtOod.pkphOe (gbv=1 mode, datacenter IPs)
+    3. Secondary: div.g / div.tF2Cxc (standard Google)
+    4. Tertiary: generic <a> link extraction
     """
     if has_captcha(html):
         return []
@@ -202,6 +273,8 @@ def parse_results(html: str, num: int = 10) -> List[Dict[str, str]]:
     soup = BeautifulSoup(html, 'html.parser')
 
     results = _parse_primary(soup)
+    if not results:
+        results = _parse_gbv1(soup)
     if not results:
         results = _parse_secondary(soup)
     if not results:

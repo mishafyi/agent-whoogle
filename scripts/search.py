@@ -120,12 +120,15 @@ def main():
         results = parse_results(html, num=args.num)
 
         if args.raw:
-            for r in results:
-                print(f"{r['title']}")
-                print(f"  {r['url']}")
-                if r['snippet']:
-                    print(f"  {r['snippet']}")
-                print()
+            if not results:
+                print("No results found.", file=sys.stderr)
+            else:
+                for r in results:
+                    print(f"{r['title']}")
+                    print(f"  {r['url']}")
+                    if r['snippet']:
+                        print(f"  {r['snippet']}")
+                    print()
             sys.exit(0)
 
         if not results:
