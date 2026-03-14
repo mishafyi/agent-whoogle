@@ -33,14 +33,6 @@ Based on [Whoogle Search](https://github.com/benbusby/whoogle-search) by Ben Bus
 
 ## How to Search
 
-Run the search script from the skill directory:
-
-```bash
-python <skill_dir>/scripts/search.py "your search query"
-```
-
-Or with `uv` (auto-installs dependencies):
-
 ```bash
 uv run <skill_dir>/scripts/search.py "your search query"
 ```
@@ -62,13 +54,13 @@ uv run <skill_dir>/scripts/search.py "your search query"
 
 ```bash
 # Basic search
-python <skill_dir>/scripts/search.py "python asyncio tutorial"
+uv run <skill_dir>/scripts/search.py "python asyncio tutorial"
 
 # Recent results only
-python <skill_dir>/scripts/search.py --time week "latest npm security advisory"
+uv run <skill_dir>/scripts/search.py --time week "latest npm security advisory"
 
 # Paginate
-python <skill_dir>/scripts/search.py --start 10 "react server components"
+uv run <skill_dir>/scripts/search.py --start 10 "react server components"
 ```
 
 ## Response Format
@@ -100,8 +92,4 @@ python <skill_dir>/scripts/search.py --start 10 "react server components"
 
 ## Dependencies
 
-Requires Python 3.9+. Dependencies (`httpx`, `beautifulsoup4`, `cachetools`) are installed automatically when using `uv run`, or install manually with:
-
-```bash
-pip install httpx[http2] beautifulsoup4 cachetools
-```
+Requires Python 3.9+ and `uv`. Dependencies are installed automatically by `uv run`.

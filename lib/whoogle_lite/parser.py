@@ -1,42 +1,153 @@
-"""Google HTML result parser — extracts search results as structured data.
+"""Google HTML result parser — ported from Whoogle Search.
 
-Includes pieces from Whoogle's app/utils/results.py (filter_link_args,
-has_ad_content) plus new HTML parsing logic for extracting results from
-Google's gbv=1 basic HTML mode.
+Source files:
+- app/filter.py (Filter class — ad removal, AI overview removal, link rewriting, CSS normalization)
+- app/models/g_classes.py (GClasses — CSS class mapping for Google's obfuscated names)
+- app/routes.py (JSON extraction — structured result parsing from filtered HTML)
+- app/utils/results.py (has_ad_content, filter_link_args — utility functions)
+
+Removed (not needed for CLI search):
+- Flask/Fernet encryption, favicon injection, site alt swaps, image proxying,
+  CSS rewriting, anonymous view, dark theme toggle, config/session handling,
+  collapse_sections, block_titles/url/tabs, image search parsing
 """
 
+import re
 import urllib.parse as urlparse
-from typing import Dict, List, Optional
+from urllib.parse import parse_qs
+from typing import Dict, List
 
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 
-# Tracking/ad params to strip from result URLs
-TRACKING_PARAMS = {
-    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-    'utm_cid', 'utm_reader', 'utm_name', 'utm_viz_id', 'utm_pubreferrer',
-    'utm_swu', 'utm_referrer', 'ref_src',
-    'sa', 'ved', 'usg', 'ei', 'sei',
-}
+# ---------------------------------------------------------------------------
+# From app/utils/results.py
+# ---------------------------------------------------------------------------
 
-# Multilingual ad keywords (from Whoogle's results.py)
-AD_KEYWORDS = {
-    'Ad', 'Ads', 'Sponsored', 'Anzeige', 'Anzeigen',
-    'Annonce', 'Annonces', 'Sponsorisé',
-    'Anuncio', 'Anuncios', 'Patrocinado',
-    'Annuncio', 'Sponsorizzato',
-    'Advertentie', 'Gesponsord',
-    'Реклама', 'Оголошення',
-    '広告', '赞助', '스폰서',
-}
+SKIP_ARGS = ['ref_src', 'utm']
 
-# CAPTCHA detection string (from Whoogle's search.py)
+BLACKLIST = [
+    'ad', 'ads', 'anuncio', 'annuncio', 'annonce', 'Anzeige', '广告', '廣告',
+    'Reklama', 'Реклама', 'Anunț', '광고', 'annons', 'Annonse', 'Iklan',
+    '広告', 'Augl.', 'Mainos', 'Advertentie', 'إعلان', 'Գովազդ', 'विज्ञापन',
+    'Reklam', 'آگهی', 'Reklāma', 'Reklaam', 'Διαφήμιση', 'מודעה', 'Hirdetés',
+    'Anúncio', 'Quảng cáo', 'โฆษณา', 'sponsored', 'patrocinado', 'gesponsert',
+    'Sponzorováno', '스폰서', 'Gesponsord', 'Sponsorisé',
+]
+
+
+def has_ad_content(element: str) -> bool:
+    """Inspects an HTML element for ad related content
+
+    Args:
+        element: The HTML element to inspect
+
+    Returns:
+        bool: True/False for the element containing an ad
+
+    """
+    element_str = ''.join(filter(str.isalpha, element))
+    return (element_str.upper() in (value.upper() for value in BLACKLIST)
+            or 'ⓘ' in element)
+
+
+def filter_link_args(link: str) -> str:
+    """Filters out unnecessary URL args from a result link
+
+    Args:
+        link: The string result link to check for extraneous URL params
+
+    Returns:
+        str: An updated (or ignored) result link
+
+    """
+    parsed_link = urlparse.urlparse(link)
+    link_args = parse_qs(parsed_link.query)
+    safe_args = {}
+
+    if len(link_args) == 0 and len(parsed_link) > 0:
+        return link
+
+    for arg in link_args.keys():
+        if arg in SKIP_ARGS:
+            continue
+
+        safe_args[arg] = link_args[arg]
+
+    # Remove original link query and replace with filtered args
+    link = link.replace(parsed_link.query, '')
+    if len(safe_args) > 0:
+        link = link + urlparse.urlencode(safe_args, doseq=True)
+    else:
+        link = link.replace('?', '')
+
+    return link
+
+
+# ---------------------------------------------------------------------------
+# From app/models/g_classes.py
+# ---------------------------------------------------------------------------
+
+class GClasses:
+    """Tracking obfuscated class names used in Google results.
+
+    Note: Using these should be a last resort. It is always preferred to filter
+    results using structural cues instead of referencing class names, as these
+    are liable to change at any moment.
+    """
+    main_tbm_tab = 'KP7LCb'
+    images_tbm_tab = 'n692Zd'
+    footer = 'TuS8Ad'
+    result_class_a = 'ZINbbc'
+    result_class_b = 'luh4td'
+    scroller_class = 'idg8be'
+    line_tag = 'BsXmcf'
+
+    result_classes = {
+        result_class_a: ['Gx5Zad'],
+        result_class_b: ['fP1Qef'],
+    }
+
+    @classmethod
+    def replace_css_classes(cls, soup: BeautifulSoup) -> BeautifulSoup:
+        """Replace updated Google classes with the original class names that
+        Whoogle relies on for styling.
+
+        Args:
+            soup: The result page as a BeautifulSoup object
+
+        Returns:
+            BeautifulSoup: The new BeautifulSoup
+        """
+        result_divs = soup.find_all('div', {
+            'class': [_ for c in cls.result_classes.values() for _ in c]
+        })
+
+        for div in result_divs:
+            new_class = ' '.join(div['class'])
+            for key, val in cls.result_classes.items():
+                new_class = ' '.join(new_class.replace(_, key) for _ in val)
+            div['class'] = new_class.split(' ')
+        return soup
+
+
+# ---------------------------------------------------------------------------
+# From app/filter.py — extract_q, Filter (trimmed)
+# ---------------------------------------------------------------------------
+
 CAPTCHA_MARKER = 'div class="g-recaptcha"'
 
-# Result container CSS classes (tiered fallback)
-PRIMARY_SELECTORS = ['div.ZINbbc', 'div.ezO2md']
-GBV1_SELECTORS = ['div.Gx5Zad.xpd.EtOod.pkphOe']
-SECONDARY_SELECTORS = ['div.g', 'div.tF2Cxc']
+unsupported_g_pages = [
+    'support.google.com',
+    'accounts.google.com',
+    'policies.google.com',
+    'google.com/preferences',
+    'google.com/intl',
+    'advanced_search',
+    'tbm=shop',
+    'ageverification.google.co.kr',
+]
 
 
 def has_captcha(html: str) -> bool:
@@ -44,240 +155,313 @@ def has_captcha(html: str) -> bool:
     return CAPTCHA_MARKER in html
 
 
-def has_ad_content(text: str) -> bool:
-    """Check if text contains ad/sponsored indicators.
+def extract_q(q_str: str, href: str) -> str:
+    """Extracts the 'q' element from a result link."""
+    return parse_qs(q_str, keep_blank_values=True)['q'][0] \
+        if ('&q=' in href or '?q=' in href) else ''
 
-    Uses word-boundary matching to avoid false positives
-    (e.g., "Adobe" should not match "Ad").
+
+class Filter:
+    """Trimmed version of Whoogle's Filter class.
+
+    Only keeps methods needed for structured result extraction:
+    - remove_ads
+    - remove_ai_overview
+    - update_styling (CSS class normalization)
+    - update_link (link rewriting / redirect stripping)
+    - sanitize_div
     """
-    words = set(text.split())
-    return bool(words & AD_KEYWORDS)
 
+    def __init__(self) -> None:
+        self.soup = None
+        self.main_divs = None
 
-def filter_link_args(url: str) -> str:
-    """Remove tracking parameters from a URL."""
-    if '?' not in url:
-        return url
-    parsed = urlparse.urlparse(url)
-    params = urlparse.parse_qs(parsed.query, keep_blank_values=True)
-    filtered = {k: v for k, v in params.items() if k not in TRACKING_PARAMS}
-    if not filtered:
-        return urlparse.urlunparse(parsed._replace(query=''))
-    new_query = urlparse.urlencode(filtered, doseq=True)
-    return urlparse.urlunparse(parsed._replace(query=new_query))
+    def clean(self, soup: BeautifulSoup) -> BeautifulSoup:
+        self.soup = soup
+        self.main_divs = self.soup.find('div', {'id': 'main'})
+        self.remove_ads()
+        self.remove_ai_overview()
+        self.update_styling()
 
+        if self.main_divs:
+            for div in self.main_divs:
+                self.sanitize_div(div)
 
-def _extract_url_from_href(href: str) -> Optional[str]:
-    """Extract the real URL from a Google redirect wrapper."""
-    if not href:
-        return None
+        for link in self.soup.find_all('a', href=True):
+            self.update_link(link)
 
-    if href.startswith('/url?'):
-        parsed = urlparse.urlparse(href)
-        params = urlparse.parse_qs(parsed.query)
-        q_vals = params.get('q', [])
-        if q_vals:
-            return filter_link_args(q_vals[0])
-        return None
+        # Ensure no extra scripts passed through
+        for script in self.soup('script'):
+            script.decompose()
 
-    if href.startswith('http'):
-        return filter_link_args(href)
+        return self.soup
 
-    return None
+    def sanitize_div(self, div) -> None:
+        """Removes escaped script and iframe tags from results"""
+        import html as html_mod
+        if not div or not isinstance(div, Tag):
+            return
 
+        for d in div.find_all('div', recursive=True):
+            d_text = d.find(string=True, recursive=False)
 
-def _extract_text(element) -> str:
-    """Extract visible text from a BeautifulSoup element."""
-    if element is None:
-        return ''
-    return element.get_text(separator=' ', strip=True)
-
-
-def _is_ad_result(container) -> bool:
-    """Check if a result container is an advertisement."""
-    text = _extract_text(container)
-    prefix = text[:80] if text else ''
-    return has_ad_content(prefix)
-
-
-def _parse_primary(soup: BeautifulSoup) -> List[Dict[str, str]]:
-    """Parse results using primary selectors (gbv=1 basic mode)."""
-    results = []
-    for selector in PRIMARY_SELECTORS:
-        containers = soup.select(selector)
-        if not containers:
-            continue
-        for container in containers:
-            if _is_ad_result(container):
+            if not d_text or not d.string:
                 continue
-            link = container.find('a', href=True)
-            if not link:
-                continue
-            url = _extract_url_from_href(link.get('href', ''))
-            if not url or not url.startswith('http'):
-                continue
-            title = _extract_text(link)
-            snippet_parts = []
-            for div in container.find_all('div', recursive=False):
-                if div.find('a') is None:
-                    text = _extract_text(div)
-                    if text and text != title:
-                        snippet_parts.append(text)
-            snippet = ' '.join(snippet_parts)
-            results.append({
-                'title': title,
-                'url': url,
-                'snippet': snippet,
-            })
-        if results:
-            return results
-    return results
+
+            d.string = html_mod.unescape(d_text)
+            div_soup = BeautifulSoup(d.string, 'html.parser')
+
+            for script in div_soup.find_all('script'):
+                script.decompose()
+
+            for iframe in div_soup.find_all('iframe'):
+                iframe.decompose()
+
+            d.string = str(div_soup)
+
+    def remove_ads(self) -> None:
+        """Removes ads found in the list of search result divs"""
+        if not self.main_divs:
+            return
+
+        for div in [_ for _ in self.main_divs.find_all('div', recursive=True)]:
+            div_ads = [_ for _ in div.find_all('span', recursive=True)
+                       if has_ad_content(_.text)]
+            _ = div.decompose() if len(div_ads) else None
+
+    def remove_ai_overview(self) -> None:
+        """Removes Google's AI Overview/SGE results from search results"""
+        if not self.main_divs:
+            return
+
+        ai_patterns = [
+            'AI Overview',
+            'AI responses may include mistakes',
+        ]
+
+        result_classes = [GClasses.result_class_a]
+        result_classes.extend(GClasses.result_classes.get(
+            GClasses.result_class_a, []))
+
+        divs_to_remove = []
+
+        for div in self.main_divs.find_all('div', recursive=True):
+            div_text = div.get_text()
+            if any(pattern in div_text for pattern in ai_patterns):
+                parent = div
+                while parent:
+                    p_cls = parent.attrs.get('class') or []
+                    if any(rc in p_cls for rc in result_classes):
+                        if parent not in divs_to_remove:
+                            divs_to_remove.append(parent)
+                        break
+                    parent = parent.parent
+
+        for div in divs_to_remove:
+            div.decompose()
+
+    def update_styling(self) -> None:
+        """Update CSS classes for result divs"""
+        GClasses.replace_css_classes(self.soup)
+
+    def update_link(self, link: Tag) -> None:
+        """Rewrite links: strip Google redirects and tracking params.
+
+        Trimmed from Whoogle's update_link — removed encryption, favicon,
+        anon view, config-dependent logic. Kept redirect stripping and
+        unsupported page removal.
+        """
+        parsed_link = urlparse.urlparse(link['href'])
+        if '/url?q=' in link['href']:
+            link_netloc = extract_q(parsed_link.query, link['href'])
+        else:
+            link_netloc = parsed_link.netloc
+
+        # Remove elements that direct to unsupported Google pages
+        if any(url in link_netloc for url in unsupported_g_pages):
+            link['href'] = link_netloc
+            parent = link.parent
+            while parent:
+                p_cls = parent.attrs.get('class') or []
+                if f'{GClasses.result_class_a}' in p_cls:
+                    parent.decompose()
+                    break
+                parent = parent.parent
+            if link.decomposed:
+                return
+
+        # Replace href with only the intended destination
+        href = link['href'].replace('https://www.google.com', '')
+        result_link = urlparse.urlparse(href)
+        q = extract_q(result_link.query, href)
+
+        if q.startswith('/') and 'spell=1' not in href:
+            link['href'] = 'https://google.com' + q
+        elif q.startswith('https://accounts.google.com'):
+            link.decompose()
+            return
+        elif 'url?q=' in href:
+            # Strip unneeded arguments — this is the main case for result links
+            link['href'] = filter_link_args(q)
+        else:
+            link['href'] = href
 
 
-def _parse_gbv1(soup: BeautifulSoup) -> List[Dict[str, str]]:
-    """Parse results from Google's gbv=1 layout using Gx5Zad containers.
+# ---------------------------------------------------------------------------
+# From app/routes.py — clean_text_spacing, JSON extraction
+# ---------------------------------------------------------------------------
 
-    Structure observed on datacenter IPs:
-      div.Gx5Zad.xpd.EtOod.pkphOe  (result container)
-        div.kCrYT or div.egMi0.kCrYT  (title link wrapper)
-          a[href=/url?q=...]  (link with title text)
-        div.kCrYT  (snippet wrapper — sibling of the title div)
+def clean_text_spacing(text: str) -> str:
+    """Clean up text spacing issues from HTML extraction."""
+    if not text:
+        return text
+
+    # Normalize multiple spaces to single space
+    text = re.sub(r'\s+', ' ', text)
+
+    # Fix domain names: "weather .com" -> "weather.com"
+    text = re.sub(r'\s+\.([a-zA-Z]{2,})\b', r'.\1', text)
+
+    # Fix www/http/https patterns: "www .example" -> "www.example"
+    text = re.sub(r'\b(www|http|https)\s+\.', r'\1.', text)
+
+    # Fix spaces before common punctuation
+    text = re.sub(r'\s+([,;:])', r'\1', text)
+
+    return text.strip()
+
+
+def _extract_json_results(soup: BeautifulSoup) -> List[Dict[str, str]]:
+    """Extract structured results from filtered soup.
+
+    Ported directly from Whoogle's routes.py JSON extraction block
+    (the `if wants_json:` branch of the /search route).
     """
     results = []
-    seen_urls = set()
-    for selector in GBV1_SELECTORS:
-        containers = soup.select(selector)
-        if not containers:
-            continue
-        for container in containers:
-            if _is_ad_result(container):
-                continue
-            # Find the title link — first <a> with /url?q= href
+    seen = set()
+
+    # Find all result containers (using known result classes)
+    result_divs = soup.find_all('div', class_=['ZINbbc', 'ezO2md'])
+
+    if result_divs:
+        # Process structured Google results with container divs
+        for div in result_divs:
+            # Find the first valid link in this result container
             link = None
-            for a in container.find_all('a', href=True):
-                href = a.get('href', '')
-                if href.startswith('/url?q='):
-                    url = _extract_url_from_href(href)
-                    if url and url.startswith('http'):
-                        parsed = urlparse.urlparse(url)
-                        if parsed.hostname and 'google' in parsed.hostname:
-                            continue
-                        link = a
-                        break
+            for a in div.find_all('a', href=True):
+                if a['href'].startswith('http'):
+                    link = a
+                    break
+
             if not link:
                 continue
-            url = _extract_url_from_href(link.get('href', ''))
-            if not url or url in seen_urls:
+
+            href = link['href']
+            if href in seen:
                 continue
-            seen_urls.add(url)
-            title = _extract_text(link)
-            if not title or len(title) < 3:
+
+            # Get all text from the result container
+            text = clean_text_spacing(div.get_text(separator=' ', strip=True))
+            if not text:
                 continue
-            # Extract snippet from sibling div.kCrYT of the title's parent
-            snippet = ''
-            title_parent = link.parent
-            if title_parent:
-                for sib in title_parent.find_next_siblings():
-                    sib_text = _extract_text(sib)
-                    if sib_text and sib_text != title:
-                        snippet = sib_text
+
+            # Extract title: h3 > span.CVA68e > link text
+            title = ''
+            h3_tag = div.find('h3')
+            if h3_tag:
+                title = clean_text_spacing(
+                    h3_tag.get_text(separator=' ', strip=True))
+            else:
+                title_span = div.find('span', class_='CVA68e')
+                if title_span:
+                    title = clean_text_spacing(
+                        title_span.get_text(separator=' ', strip=True))
+                elif link:
+                    title = clean_text_spacing(
+                        link.get_text(separator=' ', strip=True))
+
+            # Extract snippet
+            content = ''
+            snippet_selectors = [
+                {'class_': 'VwiC3b'},
+                {'class_': 'FrIlee'},
+                {'class_': 's'},
+                {'class_': 'st'},
+            ]
+
+            for selector in snippet_selectors:
+                snippet_elem = (div.find('span', selector)
+                                or div.find('div', selector))
+                if snippet_elem:
+                    content = clean_text_spacing(
+                        snippet_elem.get_text(separator=' ', strip=True))
+                    if (content and not content.startswith('www.')
+                            and '›' not in content):
                         break
+                    else:
+                        content = ''
+
+            # Fallback: full text minus title
+            if not content and title:
+                if text.startswith(title):
+                    content = text[len(title):].strip()
+                else:
+                    content = text
+            elif not content:
+                content = text
+
+            seen.add(href)
             results.append({
                 'title': title,
-                'url': url,
-                'snippet': snippet,
+                'url': href,
+                'snippet': content,
             })
-        if results:
-            return results
-    return results
-
-
-def _parse_secondary(soup: BeautifulSoup) -> List[Dict[str, str]]:
-    """Parse results using secondary selectors (standard Google)."""
-    results = []
-    for selector in SECONDARY_SELECTORS:
-        containers = soup.select(selector)
-        if not containers:
-            continue
-        for container in containers:
-            if _is_ad_result(container):
+    else:
+        # Fallback: extract links directly if no result containers found
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if not href.startswith('http'):
                 continue
-            link = container.find('a', href=True)
-            if not link:
+            # Skip google.com links
+            parsed = urlparse.urlparse(href)
+            if parsed.hostname and 'google' in parsed.hostname:
                 continue
-            url = _extract_url_from_href(link.get('href', ''))
-            if not url or not url.startswith('http'):
+            if href in seen:
                 continue
-            title = _extract_text(link.find('h3')) or _extract_text(link)
-            snippet_el = container.select_one('div.VwiC3b, div.IsZvec, span.aCOpRe')
-            snippet = _extract_text(snippet_el) if snippet_el else ''
+            text = clean_text_spacing(a.get_text(separator=' ', strip=True))
+            if not text or len(text) < 3:
+                continue
+            seen.add(href)
             results.append({
-                'title': title,
-                'url': url,
-                'snippet': snippet,
+                'title': text,
+                'url': href,
+                'snippet': '',
             })
-        if results:
-            return results
+
     return results
 
 
-def _parse_tertiary(soup: BeautifulSoup) -> List[Dict[str, str]]:
-    """Tertiary fallback: extract any links that look like search results."""
-    results = []
-    seen_urls = set()
-    for link in soup.find_all('a', href=True):
-        url = _extract_url_from_href(link.get('href', ''))
-        if not url or not url.startswith('http'):
-            continue
-        parsed = urlparse.urlparse(url)
-        if parsed.hostname and 'google' in parsed.hostname:
-            continue
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
-        title = _extract_text(link)
-        if not title or len(title) < 3:
-            continue
-        # Check parent containers for ad indicators
-        parent = link.parent
-        is_ad = False
-        for _ in range(4):
-            if parent is None:
-                break
-            if _is_ad_result(parent):
-                is_ad = True
-                break
-            parent = parent.parent
-        if is_ad:
-            continue
-        results.append({
-            'title': title,
-            'url': url,
-            'snippet': '',
-        })
-    return results
-
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def parse_results(html: str, num: int = 10) -> List[Dict[str, str]]:
     """Parse Google search HTML and extract results as structured data.
 
-    Uses tiered CSS selector fallbacks:
-    1. Primary: div.ZINbbc / div.ezO2md (gbv=1 basic mode, some regions)
-    2. GBV1: div.Gx5Zad.xpd.EtOod.pkphOe (gbv=1 mode, datacenter IPs)
-    3. Secondary: div.g / div.tF2Cxc (standard Google)
-    4. Tertiary: generic <a> link extraction
+    Pipeline (mirrors Whoogle):
+    1. Filter.clean() — remove ads, AI overview, normalize CSS, rewrite links
+    2. _extract_json_results() — extract structured results from filtered HTML
     """
     if has_captcha(html):
         return []
 
     soup = BeautifulSoup(html, 'html.parser')
 
-    results = _parse_primary(soup)
-    if not results:
-        results = _parse_gbv1(soup)
-    if not results:
-        results = _parse_secondary(soup)
-    if not results:
-        results = _parse_tertiary(soup)
+    # Run Whoogle's filter pipeline
+    f = Filter()
+    soup = f.clean(soup)
+
+    # Extract structured results (from routes.py JSON branch)
+    results = _extract_json_results(soup)
 
     return results[:num]

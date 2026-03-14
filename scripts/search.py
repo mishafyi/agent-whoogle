@@ -96,12 +96,12 @@ def main():
             print(f"Network error: {e}", file=sys.stderr)
             sys.exit(1)
 
-        # Check for HTTP 429
-        if response.status_code == 429:
+        # Check for HTTP 429 or 403 (rate limiting / bot detection)
+        if response.status_code in (403, 429):
             print(json.dumps(_output(
                 args.query, [],
                 error="rate_limited",
-                message="Google returned HTTP 429. Too many requests.",
+                message=f"Google returned HTTP {response.status_code}. Try again or use a proxy.",
             )))
             sys.exit(2)
 
